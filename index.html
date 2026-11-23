@@ -109,6 +109,7 @@ a{color:inherit}
 .seg button:hover{color:var(--fg)}
 .seg button[aria-checked="true"]{color:var(--ink-fg)}
 .seg.s button{min-height:40px;font-size:14px}
+.mergebox{margin-top:16px}
 .sum{margin:12px 4px 0;color:var(--fg2);font-size:14px;min-height:21px}
 details{border-top:1px solid var(--line);padding-top:4px}
 summary{list-style:none;cursor:pointer;min-height:48px;display:flex;align-items:center;justify-content:space-between;font-weight:600;color:var(--fg2)}
@@ -213,6 +214,10 @@ progress::-moz-progress-bar{background:var(--ink);border-radius:999px}
         <div>
           <p class="lbl">변환할 형식</p>
           <div class="seg" id="target" role="radiogroup" aria-label="변환할 형식"></div>
+          <div class="mergebox" id="mergeBox" hidden>
+            <p class="lbl">PDF 만드는 방식</p>
+            <div class="seg s" id="mergeSeg" role="radiogroup" aria-label="PDF 만드는 방식"></div>
+          </div>
           <p class="sum" id="sum" aria-live="polite"></p>
         </div>
         <details id="opts">
@@ -292,7 +297,7 @@ var MIME={jpg:'image/jpeg',png:'image/png',webp:'image/webp'};
 var LABEL={pdf:'PDF',jpg:'JPG',png:'PNG',webp:'WebP'};
 var IMGEXT={jpg:'jpg',jpeg:'jpg',png:'png',webp:'webp',heic:'heic',heif:'heic',gif:'gif',bmp:'bmp',avif:'avif'};
 var MAXPX=16000000; /* 아이폰 캔버스 한도(약 1677만 화소) 안쪽 */
-var state={files:[],target:'pdf',picked:false,dpi:150,q:90,paper:'orig',view:'edit',results:[],cancel:false,noSave:false};
+var state={files:[],target:'pdf',picked:false,merge:true,dpi:150,q:90,paper:'orig',view:'edit',results:[],cancel:false,noSave:false};
 var uid=0;
 
 try{var sv=JSON.parse(localStorage.getItem('imgconv.opts')||'{}');
@@ -376,7 +381,7 @@ function removeItem(id){
 }
 function reset(){
   state.files.slice().forEach(function(f){if(f.thumb&&f.thumb.indexOf('blob:')===0)URL.revokeObjectURL(f.thumb);if(f.doc){try{f.doc.destroy()}catch(e){}}});
-  state.files=[];state.results=[];state.view='edit';state.picked=false;state.noSave=false;render();
+  state.files=[];state.results=[];state.view='edit';state.picked=false;state.merge=true;state.noSave=false;render();
 }
 
 /* ---------- 형식 선택 ---------- */
@@ -413,7 +418,7 @@ function placeInd(box){
   ind.style.width=on.offsetWidth+'px';ind.style.transform='translateX('+on.offsetLeft+'px)';
   if(first){ind.dataset.ready='1';requestAnimationFrame(function(){requestAnimationFrame(function(){ind.classList.remove('noanim')})})}
 }
-function placeAll(){['#target','#dpiSeg','#paperSeg'].forEach(function(s){placeInd($(s))})}
+function placeAll(){['#target','#mergeSeg','#dpiSeg','#paperSeg'].forEach(function(s){placeInd($(s))})}
 function render(){
   var v=state.view,has=state.files.length>0;
   $('#drop').hidden=!(v==='edit'&&!has);
@@ -429,8 +434,11 @@ function render(){
     $('#paperBox').hidden=state.target!=='pdf';
     $('#q').value=state.q;$('#qv').textContent=state.q;$('#q').disabled=state.target==='png';
     var c=counts(),T=LABEL[state.target];
+    var showMerge=state.target==='pdf'&&c.files>1;
+    $('#mergeBox').hidden=!showMerge;
+    if(showMerge)seg($('#mergeSeg'),[{v:true,t:'하나로 만들기'},{v:false,t:'따로 만들기'}],state.merge,function(m){state.merge=m;render()});
     $('#sum').textContent=!c.files?'변환할 수 있는 파일이 없어요.':
-      state.target==='pdf'?(c.files+'개 파일 → PDF 1개'+(c.unknown?'':' ('+c.n+'쪽)')):
+      state.target==='pdf'?(showMerge&&!state.merge?c.files+'개 파일 → PDF '+c.files+'개':c.files+'개 파일 → PDF 1개'+(c.unknown?'':' ('+c.n+'쪽)')):
       ((c.unknown?'…':c.n)+'장 → '+T+' '+(c.unknown?'…':c.n)+'개');
     $('#go').disabled=!c.files;
   }
@@ -541,37 +549,64 @@ async function toImages(items,target,errors){
   }
   return out;
 }
+async function addItem(out,it,opt,onPage){
+  /* 이미지나 PDF 한 개를 문서(out)에 쪽으로 붙인다. 붙인 쪽 수와 작은 미리보기를 돌려준다 */
+  if(it.kind==='pdf'){
+    var src=await window.PDFLib.PDFDocument.load(await it.file.arrayBuffer(),{ignoreEncryption:true});
+    var pgs=await out.copyPages(src,src.getPageIndices());
+    for(var k=0;k<pgs.length;k++){out.addPage(pgs[k]);onPage()}
+    return {pages:pgs.length,thumb:it.thumb&&it.thumb.indexOf('data:')===0?it.thumb:null};
+  }
+  var bmp=await loadBitmap(it),png=it.kind==='png',c=bmpCanvas(bmp,!png);
+  var blob=await toBlob(c,png?'image/png':'image/jpeg',opt.q),bytes=new Uint8Array(await blob.arrayBuffer());
+  var img=png?await out.embedPng(bytes):await out.embedJpg(bytes),bw=c.width,bh=c.height,pg;
+  if(opt.a4){
+    var land=bw>bh,W=land?841.89:595.28,H=land?595.28:841.89,m=24,s=Math.min((W-2*m)/bw,(H-2*m)/bh),w=bw*s,hh=bh*s;
+    pg=out.addPage([W,H]);pg.drawImage(img,{x:(W-w)/2,y:(H-hh)/2,width:w,height:hh});
+  }else{
+    var pw=Math.min(14400,bw*72/opt.dpi),ph=Math.min(14400,bh*72/opt.dpi);
+    pg=out.addPage([pw,ph]);pg.drawImage(img,{x:0,y:0,width:pw,height:ph});
+  }
+  var th=smallThumb(c);c.width=c.height=0;if(bmp.close)bmp.close();onPage();
+  return {pages:1,thumb:th};
+}
 async function toPdf(items,errors){
   await loadLib('pdflib');var PDFDocument=window.PDFLib.PDFDocument;
-  var out=await PDFDocument.create(),total=0,done=0;
-  items.forEach(function(it){total+=it.kind==='pdf'?(it.pages||1):1});
-  var q=state.q/100,dpi=state.dpi,a4=state.paper==='a4',pageCount=0;
-  for(var i=0;i<items.length;i++){var it=items[i];chk();
-    try{
-      if(it.kind==='pdf'){
-        var src=await PDFDocument.load(await it.file.arrayBuffer(),{ignoreEncryption:true});
-        var pgs=await out.copyPages(src,src.getPageIndices());
-        for(var k=0;k<pgs.length;k++){out.addPage(pgs[k]);pageCount++;prog(++done,total,'PDF로 합치는 중')}
-        if(pgs.length!==(it.pages||pgs.length))total+=pgs.length-(it.pages||pgs.length);
-      }else{
-        var bmp=await loadBitmap(it),png=it.kind==='png',c=bmpCanvas(bmp,!png);
-        var blob=await toBlob(c,png?'image/png':'image/jpeg',q),bytes=new Uint8Array(await blob.arrayBuffer());
-        var img=png?await out.embedPng(bytes):await out.embedJpg(bytes),bw=c.width,bh=c.height,pg;
-        if(a4){
-          var land=bw>bh,W=land?841.89:595.28,H=land?595.28:841.89,m=24,s=Math.min((W-2*m)/bw,(H-2*m)/bh),w=bw*s,hh=bh*s;
-          pg=out.addPage([W,H]);pg.drawImage(img,{x:(W-w)/2,y:(H-hh)/2,width:w,height:hh});
+  var opt={q:state.q/100,dpi:state.dpi,a4:state.paper==='a4'};
+  var separate=items.length>1&&state.merge===false,done=0,total=0,out=[],used={};
+  if(separate){
+    /* 따로 만들기: 파일마다 PDF 하나. 이름은 원본 그대로. PDF는 그대로 담는다 */
+    total=items.length;
+    for(var i=0;i<items.length;i++){var it=items[i];chk();
+      try{
+        if(it.kind==='pdf'){
+          out.push({name:uniq(it.base+'.pdf',used),blob:it.file,size:it.size,thumb:it.thumb&&it.thumb.indexOf('data:')===0?it.thumb:null,pages:it.pages||0});
+          prog(++done,total,'PDF를 만드는 중');
         }else{
-          var pw=Math.min(14400,bw*72/dpi),ph=Math.min(14400,bh*72/dpi);
-          pg=out.addPage([pw,ph]);pg.drawImage(img,{x:0,y:0,width:pw,height:ph});
+          var doc=await PDFDocument.create(),r=await addItem(doc,it,opt,function(){});
+          var bytes=await doc.save(),blob=new Blob([bytes],{type:'application/pdf'});
+          out.push({name:uniq(it.base+'.pdf',used),blob:blob,size:blob.size,thumb:r.thumb,pages:1});
+          prog(++done,total,'PDF를 만드는 중');
         }
-        pageCount++;c.width=c.height=0;if(bmp.close)bmp.close();prog(++done,total,'PDF로 합치는 중');
-      }
-    }catch(e){if(e.message==='cancel')throw e;errors.push(it.name+': '+(e.message||'합치지 못했어요'))}
+      }catch(e){if(e.message==='cancel')throw e;errors.push(it.name+': '+(e.message||'만들지 못했어요'))}
+      await tick();
+    }
+    if(!out.length)throw new Error('PDF로 만들 수 있는 파일이 없어요.');
+    return out;
+  }
+  /* 하나로 만들기: 모든 파일을 한 문서의 여러 쪽으로. 이름은 첫파일_하나로.pdf */
+  var merged=await PDFDocument.create(),pageCount=0;
+  items.forEach(function(x){total+=x.kind==='pdf'?(x.pages||1):1});
+  for(var j=0;j<items.length;j++){var it2=items[j];chk();
+    try{
+      var res=await addItem(merged,it2,opt,function(){prog(++done,Math.max(total,done),'PDF로 합치는 중')});
+      pageCount+=res.pages;
+    }catch(e){if(e.message==='cancel')throw e;errors.push(it2.name+': '+(e.message||'합치지 못했어요'))}
     await tick();
   }
   if(!pageCount)throw new Error('PDF에 넣을 수 있는 쪽이 없어요.');
-  var bytes2=await out.save(),blob2=new Blob([bytes2],{type:'application/pdf'});
-  var nm=items.length===1?items[0].base+'.pdf':items[0].base+'_합침.pdf';
+  var bytes2=await merged.save(),blob2=new Blob([bytes2],{type:'application/pdf'});
+  var nm=items.length===1?items[0].base+'.pdf':items[0].base+'_하나로.pdf';
   return [{name:nm,blob:blob2,size:blob2.size,thumb:null,pages:pageCount}];
 }
 
@@ -581,7 +616,7 @@ function renderDone(){
   $('#ok').hidden=!r.length;
   $('#doneH').textContent=r.length?(r.length===1?'변환했어요':r.length+'개를 변환했어요'):'변환하지 못했어요';
   var tot=r.reduce(function(s,x){return s+x.size},0);
-  $('#doneS').textContent=r.length?(r[0].pages?r[0].pages+'쪽 · ':'')+fmtSize(tot):'아래 이유를 확인해 주세요.';
+  $('#doneS').textContent=r.length?(r.length===1&&r[0].pages?r[0].pages+'쪽 · ':'')+fmtSize(tot):'아래 이유를 확인해 주세요.';
   var res=$('#res');
   res.replaceChildren.apply(res,r.map(function(x){
     return h('div',{class:'card'},
